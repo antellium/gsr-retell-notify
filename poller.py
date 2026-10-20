@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -75,6 +76,9 @@ NO_INTENT_PATTERNS = [
     "no information was exchanged", "disconnected before",
     "did not provide", "inaudible",
 ]
+
+# Our own Twilio lines. A bridged test call into the receptionist must never queue itself.
+OWN_LINES = {"8328003644", "8449814653", "3465977800"}
 
 SEED_BLOCKLIST = Path(__file__).parent / "blocked_numbers.txt"
 STATE_PATH = Path(os.environ.get("STATE_DIR", "/tmp")) / "callback_state.json"
@@ -132,6 +136,8 @@ def is_real_call(call, blocked=frozenset()):
     frm = digits10(call.get("from_number"))
     if frm and frm in blocked:
         return False, "blocklist"
+    if frm in OWN_LINES:
+        return False, "own_line"
     text = summary + " " + (call.get("transcript") or "").lower()
     for pat in ROBOCALL_PATTERNS:
         if pat in text:
@@ -153,10 +159,25 @@ def is_real_call(call, blocked=frozenset()):
     return True, "real"
 
 
+# Caller ID can be spoofed, and pressing 1 dials it. Only ring for plain US/Canada
+# numbers: no premium 900/976, no Caribbean NANP codes used in one-ring toll fraud.
+DIALABLE = re.compile(r"^\+1[2-9]\d{2}[2-9]\d{6}$")
+TOLL_FRAUD_AREA_CODES = {
+    "242", "246", "264", "268", "284", "340", "345", "441", "473", "649", "658",
+    "664", "670", "671", "684", "721", "758", "767", "784", "787", "809", "829",
+    "849", "868", "869", "876", "939", "900", "976",
+}
+
+
+def dialable(number):
+    return bool(DIALABLE.match(number or "")) and number[2:5] not in TOLL_FRAUD_AREA_CODES \
+        and number[5:8] not in ("900", "976")
+
+
 def wants_ring(call):
     frm = call.get("from_number") or ""
-    if not frm.startswith("+") or len(frm) < 11:
-        return False, "no_callback_number"
+    if not dialable(frm):
+        return False, "not_dialable"
     summary = ((call.get("call_analysis") or {}).get("call_summary") or "").lower()
     for pat in NO_RING_PATTERNS:
         if pat in summary:
@@ -265,6 +286,8 @@ def process_call(call):
 
 
 def enqueue(number, line, whisper, call_id):
+    if not dialable(number):
+        raise ValueError(f"refusing to queue non-dialable number {number}")
     now = int(time.time())
     with LOCK:
         state = load_state()
@@ -478,6 +501,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_ok():
                 return self._send(403, {"error": "forbidden"})
             body = json.loads(raw or b"{}")
+            if not dialable(body.get("number")):
+                return self._send(400, {"error": "not a dialable US number"})
             enqueue(body["number"], body.get("line"), body.get("whisper", "This is a test callback."), "test")
             return self._send(200, {"queued": body["number"], "session": tick()})
 
