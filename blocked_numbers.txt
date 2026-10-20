@@ -1,0 +1,9 @@
+# One number per line. Calls from these never text Anthony.
+# Most spam rotates numbers, so ROBOCALL_PATTERNS in retell_notify.py does the heavy lifting.
+5082062574
+2522014572
+4302005977
+5042029838
+2402109771
+4752072948
+9892352240
